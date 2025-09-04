@@ -9,9 +9,9 @@ port = '14550'
 # Створення MAVLink-з'єднання
 master = mavutil.mavlink_connection(f'udpout:{ip}:{port}')
 
-lat = 51.19080 * 1e7  # Початкова широта (Бахмач)
-lon = 32.82809 * 1e7  # Початкова довгота
-alt = 1000 * 1000     # 1000 м у мм
+lat_initial = 51.15964  # Початкова широта (Бахмач)
+lon_initial = 32.73854  # Початкова довгота
+alt = 1000 * 1000       # Початкова висота 1000 м у мм
 
 t = 0
 start_time = time.monotonic()
@@ -21,13 +21,12 @@ R_earth = 6378137  # м
 
 # Параметри для змійки
 speed = 36.11  # м/с
-angle_rad = math.radians(160)  # кут для компонент швидкості
-vx = int(-speed * math.cos(angle_rad) * 100)  # см/с
-vy = int(-speed * math.sin(angle_rad) * 100)  # см/с
+# Діагональний рух: із північного сходу на південний захід (45° від півночі проти годинникової стрілки)
+angle_rad = math.radians(225)  # 225° = південний захід
+vx = int(speed/100 * math.cos(angle_rad)*100)  # см/с
+vy = int(speed/100 * math.sin(angle_rad)*100)  # см/с
 vz = 0  # вертикальна швидкість
-lat_initial = 51.19080  # градуси
-lon_initial = 32.82809  # градуси
-# Амплітуда для зміщення: 3 км (1 км вліво + 2 км вправо) = 0.0428° на широті 51.19080°
+# Амплітуда для зміщення: 3 км (1 км в один бік + 2 км в інший) = 0.0428° на широті 51.19080°
 amplitude = 0.0214  # половина 0.0428°, оскільки синус коливається в обидва боки
 # Період: 3 км по траєкторії за 36.11 м/с ≈ 83 с
 omega = 2 * math.pi / 83  # кутова частота (рад/с)
@@ -60,21 +59,32 @@ try:
             errors_count4=0
         )
 
-        # GLOBAL_POSITION_INT (рух із змійкою)
-        # Лінійна зміна широти
+        # GLOBAL_POSITION_INT (рух по діагоналі зі змійкою)
+        # Лінійний рух по діагоналі (широта і довгота змінюються за vx, vy)
         lat_sim = int((lat_initial + (vy / 100.0 * t / R_earth) * (180 / math.pi)) * 1e7)
-        # Синусоїдальне зміщення для довготи
-        lon_offset = amplitude * math.sin(omega * t)  # зміщення в градусах
-        lon_sim = int((lon_initial + (vx / 100.0 * t / R_earth / math.cos(math.radians(lat_initial))) * (180 / math.pi) + lon_offset) * 1e7)
+        lon_sim = int((lon_initial + (vx / 100.0 * t / R_earth / math.cos(math.radians(lat_initial))) * (180 / math.pi)) * 1e7)
+
+        # Синусоїдальне зміщення перпендикулярно до діагоналі
+        # Напрямок змійки: перпендикулярний до 225° (тобто 225° + 90° = 315°)
+        snake_angle = math.radians(315)
+        snake_offset = amplitude * math.sin(omega * t)  # зміщення в градусах
+        # Зміщення широти і довготи для змійки
+        lat_snake = snake_offset * math.cos(snake_angle)  # компонента широти
+        lon_snake = snake_offset * math.sin(snake_angle) / math.cos(math.radians(lat_initial))  # компонента довготи
+        lat_sim += int(lat_snake * 1e7)
+        lon_sim += int(lon_snake * 1e7)
 
         # Обчислення динамічного курсу
         # Базова швидкість: vx, vy (см/с)
-        # Латеральна швидкість від змійки: похідна від lon_offset
-        lon_offset_m = lon_offset * (R_earth * math.cos(math.radians(lat_initial)) * math.pi / 180)  # зміщення в метрах
-        v_lon = amplitude * omega * math.cos(omega * t) * (R_earth * math.cos(math.radians(lat_initial)) * math.pi / 180)  # м/с
-        v_lon_cm = v_lon * 100  # см/с
-        vx_total = vx + v_lon_cm  # загальна швидкість по x (см/с)
-        vy_total = vy  # швидкість по y без змін
+        # Латеральна швидкість від змійки: похідна від зміщення
+        snake_offset_m = snake_offset * (R_earth * math.pi / 180)  # зміщення в метрах
+        v_snake = amplitude * omega * math.cos(omega * t) * (R_earth * math.pi / 180)  # м/с
+        v_snake_cm = v_snake * 100  # см/с
+        # Компоненти латеральної швидкості
+        vx_snake = v_snake_cm * math.sin(snake_angle)  # латеральна швидкість по x
+        vy_snake = v_snake_cm * math.cos(snake_angle)  # латеральна швидкість по y
+        vx_total = vx + vx_snake
+        vy_total = vy + vy_snake
         # Курс: arctan2(vx_total, vy_total) для відповідності MAVLink (0° = північ, позитивний за годинниковою)
         hdg_rad = math.atan2(vx_total, vy_total) % (2 * math.pi)  # нормалізуємо до [0, 2π)
         hdg = int((math.degrees(hdg_rad) % 360) * 100)  # курс у cdeg
@@ -89,7 +99,7 @@ try:
             lon_sim,           # довгота (у 1e7 градусів)
             alt,               # висота над морем (мм)
             alt,               # відносна висота (мм)
-            vx, vy,            # vx, vy (см/с, базові швидкості)
+            vx, vy,            # vx, vy (базові швидкості, см/с)
             vz,                # vz
             hdg                # динамічний курс (cdeg)
         )
